@@ -42,6 +42,12 @@ def binary_tanh_unit(x):
     
 def binary_sigmoid_unit(x):
     return round3(hard_sigmoid(x))
+
+def binary_linear_unit(x):
+    # print (x, round3(x))
+    pprint(x)
+    return round3(x)
+
     
 # The weights' binarization function, 
 # taken directly from the BinaryConnect github repository 
@@ -270,7 +276,7 @@ def train(layer_fwdfns, layer_testfwdfns,
     
     # This function tests the model a full epoch (on the whole dataset)
     def val_epoch(X,y):
-        
+
         err = 0
         loss = 0
         batches = len(X)/batch_size

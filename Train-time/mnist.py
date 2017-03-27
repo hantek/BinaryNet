@@ -16,12 +16,40 @@ np.random.seed(1234)  # for reproducibility
 import theano
 import theano.tensor as T
 import lasagne
+
+# if os.environ['HOME'] == '/home/hantek':
+#     os.environ['PYLEARN2_DATA_PATH'] = '/home/hantek/projects/OnchipBNN'
+#     from pylearn2.datasets.mnist import MNIST10 as MNIST
+# else:
+#     from pylearn2.datasets.mnist import MNIST
 from pylearn2.datasets.mnist import MNIST
 from pylearn2.utils import serial
 
 import binary_net
 
 import pdb
+#theano.config.compute_test_value = 'warn'  # 'off' # Use 'warn' to activate this feature
+
+
+def quantization (array,num_bits):# DAC Quantization
+    # This quantization will limit input array in range [0, 1)
+   
+    max_num = 1.0 - 0.5**num_bits 
+    min_num = 0
+    num_levels = (2. ** num_bits)
+    
+    array_res = np.empty_like(array)
+    array_res[:] = array  
+    array_res = array_res.reshape(array_res.size,)
+
+    levels = np.linspace(min_num,max_num,num_levels)
+    cnt = 0    
+    for i in np.nditer(array):
+        tmp = np.abs(levels - i)
+        index = (tmp == np.min(np.abs(levels - i)))        
+        array_res[cnt] = levels[index]
+        cnt = cnt + 1        
+    return array_res.reshape((array.shape))
 
 
 if __name__ == "__main__":
@@ -37,20 +65,14 @@ if __name__ == "__main__":
     print("epsilon = "+str(epsilon))
     
     # MLP parameters
-    num_units = 4096
+    num_units = 4096  # 96
     print("num_units = "+str(num_units))
     n_hidden_layers = 3
     print("n_hidden_layers = "+str(n_hidden_layers))
     
     # Training parameters
-    num_epochs = 1000
+    num_epochs = 100
     print("num_epochs = "+str(num_epochs))
-    
-    # Dropout parameters
-    dropout_in = .2 # 0. means no dropout
-    print("dropout_in = "+str(dropout_in))
-    dropout_hidden = .5
-    print("dropout_hidden = "+str(dropout_hidden))
     
     # BinaryOut
     activation = binary_net.binary_tanh_unit
@@ -154,7 +176,7 @@ if __name__ == "__main__":
                 W_LR_scale=W_LR_scale,
                 nonlinearity=lasagne.nonlinearities.identity,
                 num_units=num_units)                  
-        
+
         mlp = lasagne.layers.BatchNormLayer(
                 mlp,
                 epsilon=epsilon, 
@@ -168,7 +190,7 @@ if __name__ == "__main__":
         layer_outputs.append(kth_output)
 
         layer_faketargets.append(T.matrix(str('k') + '\'s_layer_target'))
-        fakeloss = T.mean(T.sum(kth_output * layer_faketargets[-1], axis=1))
+        fakeloss = T.sum(kth_output * layer_faketargets[-1])
         layer_fakelosses.append(fakeloss)
 
         layer_deltas.append(T.grad(fakeloss, wrt=layer_inputs[-1]))
@@ -176,6 +198,10 @@ if __name__ == "__main__":
         if binary:
             # W updates
             W = lasagne.layers.get_all_params(mlp, binary=True)
+
+            print("layer %d: " % k),
+            print(W)
+
             W_grads = binary_net.compute_grads(fakeloss, mlp)
             updates = lasagne.updates.adam(loss_or_grads=W_grads, params=W, learning_rate=LR)
             updates = binary_net.clipping_scaling(updates, mlp)
@@ -234,6 +260,10 @@ if __name__ == "__main__":
         
         # W updates
         W = lasagne.layers.get_all_params(mlp, binary=True)
+
+        print("classfifer: "),
+        print(W)
+
         W_grads = binary_net.compute_grads(loss, mlp)
         updates = lasagne.updates.adam(loss_or_grads=W_grads, params=W, learning_rate=LR)
         updates = binary_net.clipping_scaling(updates,mlp)
