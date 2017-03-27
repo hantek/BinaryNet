@@ -4,7 +4,9 @@ from __future__ import print_function
 import sys
 import os
 import time
-
+from collections import OrderedDict
+import cPickle as pickle
+import gzip
 import numpy as np
 np.random.seed(1234)  # for reproducibility
 
@@ -13,18 +15,14 @@ np.random.seed(1234)  # for reproducibility
 # theano.sandbox.cuda.use('gpu1') 
 import theano
 import theano.tensor as T
-
 import lasagne
-
-import cPickle as pickle
-import gzip
-
-import binary_net
-
 from pylearn2.datasets.mnist import MNIST
 from pylearn2.utils import serial
 
-from collections import OrderedDict
+import binary_net
+
+import pdb
+
 
 if __name__ == "__main__":
     
@@ -119,22 +117,37 @@ if __name__ == "__main__":
     print('Building the MLP...') 
     
     # Prepare Theano variables for inputs and targets
-    input = T.tensor4('inputs')
     target = T.matrix('targets')
     LR = T.scalar('LR', dtype=theano.config.floatX)
 
-    mlp = lasagne.layers.InputLayer(
-            shape=(None, 1, 28, 28),
-            input_var=input)
-            
-    mlp = lasagne.layers.DropoutLayer(
-            mlp, 
-            p=dropout_in)
-    
+    layer_inputs = []
+    layer_outputs = []
+    layer_testoutputs = []
+
+    layer_faketargets = []
+    layer_fakelosses = []
+    layer_updates = []
+    layer_deltas = []
+
+    layer_fwdfns = []
+    layer_bcwdfns = []
+    layer_testfwdfns = []
+
     for k in range(n_hidden_layers):
+        if k == 0:
+            input = T.tensor4('original_4d_inputs')
+            layer_inputs.append(input)
+            l_input = lasagne.layers.InputLayer(
+                    shape=(None, 1, 28, 28),
+                    input_var=layer_inputs[-1])
+        else:
+            layer_inputs.append(T.matrix(str('k') + '\'s input'))
+            l_input = lasagne.layers.InputLayer(
+                    shape=(None, num_units),
+                    input_var=layer_inputs[-1])
 
         mlp = binary_net.DenseLayer(
-                mlp, 
+                l_input, 
                 binary=binary,
                 stochastic=stochastic,
                 H=H,
@@ -150,13 +163,55 @@ if __name__ == "__main__":
         mlp = lasagne.layers.NonlinearityLayer(
                 mlp,
                 nonlinearity=activation)
-                
-        mlp = lasagne.layers.DropoutLayer(
-                mlp, 
-                p=dropout_hidden)
-    
+        
+        kth_output = lasagne.layers.get_output(mlp, deterministic=False)
+        layer_outputs.append(kth_output)
+
+        layer_faketargets.append(T.matrix(str('k') + '\'s_layer_target'))
+        fakeloss = T.mean(T.sum(kth_output * layer_faketargets[-1], axis=1))
+        layer_fakelosses.append(fakeloss)
+
+        layer_deltas.append(T.grad(fakeloss, wrt=layer_inputs[-1]))
+
+        if binary:
+            # W updates
+            W = lasagne.layers.get_all_params(mlp, binary=True)
+            W_grads = binary_net.compute_grads(fakeloss, mlp)
+            updates = lasagne.updates.adam(loss_or_grads=W_grads, params=W, learning_rate=LR)
+            updates = binary_net.clipping_scaling(updates, mlp)
+
+            # other parameters updates
+            params = lasagne.layers.get_all_params(mlp, trainable=True, binary=False)
+            updates = OrderedDict(
+                    updates.items() + \
+                    lasagne.updates.adam(loss_or_grads=fakeloss, params=params, learning_rate=LR).items())
+        else:
+            params = lasagne.layers.get_all_params(mlp, trainable=True)
+            updates = lasagne.updates.adam(loss_or_grads=fakeloss, params=params, learning_rate=LR)
+
+        layer_updates.append(updates)
+
+        fwdfn = theano.function([layer_inputs[-1]], layer_outputs[-1])
+        layer_fwdfns.append(fwdfn)
+
+        bcwdfn = theano.function(
+                [layer_inputs[-1], layer_faketargets[-1], LR],
+                layer_deltas[-1], updates=updates)
+        layer_bcwdfns.append(bcwdfn)
+        
+        ## stuffs for test
+        layer_testoutputs.append(lasagne.layers.get_output(mlp, deterministic=True))
+        testfwdfn = theano.function([layer_inputs[-1]], layer_testoutputs[-1])
+        layer_testfwdfns.append(testfwdfn)
+
+    classifier_input = T.matrix('classifier_input')
+
+    l_classifier_input = lasagne.layers.InputLayer(
+                shape=(None, num_units),
+                input_var=classifier_input)
+
     mlp = binary_net.DenseLayer(
-                mlp, 
+                l_classifier_input, 
                 binary=binary,
                 stochastic=stochastic,
                 H=H,
@@ -173,44 +228,49 @@ if __name__ == "__main__":
     
     # squared hinge loss
     loss = T.mean(T.sqr(T.maximum(0.,1.-target*train_output)))
-    
+    classifier_delta = T.grad(loss, wrt=classifier_input)
+
     if binary:
         
         # W updates
         W = lasagne.layers.get_all_params(mlp, binary=True)
-        W_grads = binary_net.compute_grads(loss,mlp)
+        W_grads = binary_net.compute_grads(loss, mlp)
         updates = lasagne.updates.adam(loss_or_grads=W_grads, params=W, learning_rate=LR)
         updates = binary_net.clipping_scaling(updates,mlp)
         
         # other parameters updates
         params = lasagne.layers.get_all_params(mlp, trainable=True, binary=False)
         updates = OrderedDict(updates.items() + lasagne.updates.adam(loss_or_grads=loss, params=params, learning_rate=LR).items())
-        
+
     else:
         params = lasagne.layers.get_all_params(mlp, trainable=True)
         updates = lasagne.updates.adam(loss_or_grads=loss, params=params, learning_rate=LR)
 
-    test_output = lasagne.layers.get_output(mlp, deterministic=True)
-    test_loss = T.mean(T.sqr(T.maximum(0.,1.-target*test_output)))
-    test_err = T.mean(T.neq(T.argmax(test_output, axis=1), T.argmax(target, axis=1)),dtype=theano.config.floatX)
-    
     # Compile a function performing a training step on a mini-batch (by giving the updates dictionary) 
     # and returning the corresponding training loss:
-    train_fn = theano.function([input, target, LR], loss, updates=updates)
+    classifier_train_fn = theano.function(
+        [classifier_input, target, LR], [loss, classifier_delta], updates=updates)
 
     # Compile a second function computing the validation loss and accuracy:
-    val_fn = theano.function([input, target], [test_loss, test_err])
+    test_output = lasagne.layers.get_output(mlp, deterministic=True)
+    test_loss = T.mean(T.sqr(T.maximum(0.,1.-target*test_output)))
+    test_err = T.mean(T.neq(T.argmax(test_output, axis=1),
+                            T.argmax(target, axis=1)),
+                      dtype=theano.config.floatX)
+    classifier_val_fn = theano.function([classifier_input, target], [test_loss, test_err])
 
     print('Training...')
-    
     binary_net.train(
-            train_fn,val_fn,
-            mlp,
-            batch_size,
-            LR_start,LR_decay,
-            num_epochs,
-            train_set.X,train_set.y,
-            valid_set.X,valid_set.y,
-            test_set.X,test_set.y,
-            save_path,
-            shuffle_parts)
+        layer_fwdfns, layer_testfwdfns,
+        classifier_train_fn, classifier_val_fn,
+        layer_bcwdfns, 
+        n_hidden_layers,
+        mlp,
+        batch_size,
+        LR_start,LR_decay,
+        num_epochs,
+        train_set.X,train_set.y,
+        valid_set.X,valid_set.y,
+        test_set.X,test_set.y,
+        save_path,
+        shuffle_parts)

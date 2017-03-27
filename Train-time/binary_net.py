@@ -1,8 +1,6 @@
 
 import time
-
 from collections import OrderedDict
-
 import numpy as np
 
 # specifying the gpu to use
@@ -10,13 +8,13 @@ import numpy as np
 # theano.sandbox.cuda.use('gpu1') 
 import theano
 import theano.tensor as T
-
-import lasagne
-
 from theano.sandbox.rng_mrg import MRG_RandomStreams as RandomStreams
-
 from theano.scalar.basic import UnaryScalarOp, same_out_nocomplex
 from theano.tensor.elemwise import Elemwise
+import lasagne
+
+import pdb
+
 
 # Our own rounding function, that does not set the gradient to 0 like Theano's
 class Round3(UnaryScalarOp):
@@ -108,7 +106,6 @@ class DenseLayer(lasagne.layers.DenseLayer):
             super(DenseLayer, self).__init__(incoming, num_units, **kwargs)
         
     def get_output_for(self, input, deterministic=False, **kwargs):
-        
         self.Wb = binarization(self.W,self.H,self.binary,deterministic,self.stochastic,self._srng)
         Wr = self.W
         self.W = self.Wb
@@ -116,7 +113,7 @@ class DenseLayer(lasagne.layers.DenseLayer):
         rvalue = super(DenseLayer, self).get_output_for(input, **kwargs)
         
         self.W = Wr
-        
+
         return rvalue
 
 # This class extends the Lasagne Conv2DLayer to support BinaryConnect
@@ -197,7 +194,10 @@ def clipping_scaling(updates,network):
         
 # Given a dataset and a model, this function trains the model on the dataset for several epochs
 # (There is no default trainer function in Lasagne yet)
-def train(train_fn,val_fn,
+def train(layer_fwdfns, layer_testfwdfns,
+            classifier_train_fn, classifier_val_fn,
+            layer_bcwdfns, 
+            n_hidden_layers,
             model,
             batch_size,
             LR_start,LR_decay,
@@ -253,10 +253,19 @@ def train(train_fn,val_fn,
         batches = len(X)/batch_size
         
         for i in range(batches):
-            loss += train_fn(X[i*batch_size:(i+1)*batch_size],y[i*batch_size:(i+1)*batch_size],LR)
+            output = [X[i*batch_size:(i+1)*batch_size],]
+            for k in range(n_hidden_layers):
+                output.append(layer_fwdfns[k](output[-1]))
+
+            batch_loss, delta = classifier_train_fn(
+                output[-1], y[i*batch_size:(i+1)*batch_size],LR)
+
+            for k in range(0, n_hidden_layers, -1):
+                delta = layer_bcwdfns[k](output[k], delta, LR)
+
+            loss += batch_loss
         
-        loss/=batches
-        
+        loss /= batches
         return loss
     
     # This function tests the model a full epoch (on the whole dataset)
@@ -267,7 +276,12 @@ def train(train_fn,val_fn,
         batches = len(X)/batch_size
         
         for i in range(batches):
-            new_loss, new_err = val_fn(X[i*batch_size:(i+1)*batch_size], y[i*batch_size:(i+1)*batch_size])
+            output = [X[i*batch_size:(i+1)*batch_size],]
+            for k in range(n_hidden_layers):
+                output.append(layer_testfwdfns[k](output[-1]))
+
+            new_loss, new_err = classifier_val_fn(output[-1], y[i*batch_size:(i+1)*batch_size])
+            
             err += new_err
             loss += new_loss
         
