@@ -76,10 +76,10 @@ if __name__ == "__main__":
     print("num_epochs = "+str(num_epochs))
     
     # BinaryOut
-    activation = binary_net.binary_tanh_unit
-    print("activation = binary_net.binary_tanh_unit")
-    # activation = binary_net.binary_sigmoid_unit
-    # print("activation = binary_net.binary_sigmoid_unit")
+    activation = binary_net.binary_sigmoid_unit
+    print("activation = binary_net.binary_sigmoid_unit")
+    # activation = binary_net.binary_tanh_unit
+    # print("activation = binary_net.binary_tanh_unit")
     
     # BinaryConnect
     binary = True

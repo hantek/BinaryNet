@@ -275,7 +275,6 @@ def train(
         batches = len(X)/batch_size
         
         for i in range(batches):
-            print("one batch processed in val_epoch")
             output = [X[i*batch_size:(i+1)*batch_size],]
             for k in range(n_hidden_layers):
                 output.append(layer_testfwdfns[k](output[-1]))
