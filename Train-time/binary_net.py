@@ -84,7 +84,8 @@ def binarization(W,H,binary=True,deterministic=False,stochastic=False,srng=None)
 # This class extends the Lasagne DenseLayer to support BinaryConnect
 class DenseLayer(lasagne.layers.DenseLayer):
     
-    def __init__(self, incoming, num_units, 
+    def __init__(self, incoming, num_units,
+        W=False, b=False, 
         binary = True, stochastic = True, H=1.,W_LR_scale="Glorot", **kwargs):
         
         self.binary = binary
@@ -104,7 +105,10 @@ class DenseLayer(lasagne.layers.DenseLayer):
         self._srng = RandomStreams(lasagne.random.get_rng().randint(1, 2147462579))
         
         if self.binary:
-            super(DenseLayer, self).__init__(incoming, num_units, W=lasagne.init.Uniform((-self.H,self.H)), **kwargs)
+            super(DenseLayer, self).__init__(incoming, num_units,
+                    W=W, b=b, **kwargs)
+                    # W=lasagne.init.Uniform((-self.H,self.H)),
+                    # **kwargs)
             # add the binary tag to weights            
             self.params[self.W]=set(['binary'])
             
@@ -190,6 +194,7 @@ def clipping_scaling(updates,network):
     for layer in layers:
     
         params = layer.get_params(binary=True)
+
         for param in params:
             print("W_LR_scale = "+str(layer.W_LR_scale))
             print("H = "+str(layer.H))
@@ -200,11 +205,17 @@ def clipping_scaling(updates,network):
         
 # Given a dataset and a model, this function trains the model on the dataset for several epochs
 # (There is no default trainer function in Lasagne yet)
-def train(layer_fwdfns, layer_testfwdfns,
+def train(
+            train_fn, val_fn,
+            layer_fwdfns, layer_testfwdfns,
             classifier_train_fn, classifier_val_fn,
             layer_bcwdfns, 
             n_hidden_layers,
+            
             model,
+
+            layer_updates, test_W, test_b, test_beta, test_gamma, original_W, original_b, original_beta, original_gamma,
+
             batch_size,
             LR_start,LR_decay,
             num_epochs,
@@ -253,12 +264,50 @@ def train(layer_fwdfns, layer_testfwdfns,
         # return new_X,new_y
     
     # This function trains the model a full epoch (on the whole dataset)
-    def train_epoch(X,y,LR):
+    def test_train_epoch(X,y,LR):
         
         loss = 0
         batches = len(X)/batch_size
         
         for i in range(batches):
+            print("one batch processed in test_train_epoch")
+            loss += train_fn(X[i*batch_size:(i+1)*batch_size],y[i*batch_size:(i+1)*batch_size],LR)
+        
+        loss /= batches
+        return loss
+    
+    # This function tests the model a full epoch (on the whole dataset)
+    def test_val_epoch(X,y):
+
+        err = 0
+        loss = 0
+        batches = len(X)/batch_size
+        
+        for i in range(batches):
+            print("one batch processed in test_val_epoch")
+            new_loss, new_err = val_fn(X[i*batch_size:(i+1)*batch_size], y[i*batch_size:(i+1)*batch_size])
+            err += new_err
+            loss += new_loss
+        
+        err = err / batches * 100
+        loss /= batches
+
+        return err, loss
+    
+    
+    # This function trains the model a full epoch (on the whole dataset)
+    def train_epoch(X,y,LR):
+        
+        loss = 0
+        batches = len(X)/batch_size
+        
+        """
+        for i in range(batches):
+            loss += train_fn(X[i*batch_size:(i+1)*batch_size],y[i*batch_size:(i+1)*batch_size],LR)
+        
+        """
+        for i in range(batches):
+            print("one batch processed in train_epoch")
             output = [X[i*batch_size:(i+1)*batch_size],]
             for k in range(n_hidden_layers):
                 output.append(layer_fwdfns[k](output[-1]))
@@ -266,11 +315,11 @@ def train(layer_fwdfns, layer_testfwdfns,
             batch_loss, delta = classifier_train_fn(
                 output[-1], y[i*batch_size:(i+1)*batch_size],LR)
 
-            for k in range(0, n_hidden_layers, -1):
+            for k in range(n_hidden_layers - 1, -1, -1):
                 delta = layer_bcwdfns[k](output[k], delta, LR)
 
             loss += batch_loss
-        
+
         loss /= batches
         return loss
     
@@ -281,7 +330,15 @@ def train(layer_fwdfns, layer_testfwdfns,
         loss = 0
         batches = len(X)/batch_size
         
+        """
         for i in range(batches):
+            new_loss, new_err = val_fn(X[i*batch_size:(i+1)*batch_size], y[i*batch_size:(i+1)*batch_size])
+            err += new_err
+            loss += new_loss
+
+        """
+        for i in range(batches):
+            print("one batch processed in val_epoch")
             output = [X[i*batch_size:(i+1)*batch_size],]
             for k in range(n_hidden_layers):
                 output.append(layer_testfwdfns[k](output[-1]))
@@ -302,15 +359,40 @@ def train(layer_fwdfns, layer_testfwdfns,
     best_epoch = 1
     LR = LR_start
     
+    #### check if all params are the sme after update
+    for aa, bb in zip([test_W, test_b, test_beta, test_gamma],
+                      [original_W, original_b, original_beta, original_gamma]):
+        try:
+            for aaa, bbb in zip(aa, bb):
+                assert np.allclose(aaa.get_value(), bbb.get_value())
+        except AssertionError:
+            pdb.set_trace()
+    ####
     # We iterate over epochs:
     for epoch in range(num_epochs):
         
         start_time = time.time()
-        
+
         train_loss = train_epoch(X_train,y_train,LR)
+        test_train_loss = test_train_epoch(X_train,y_train,LR)
+
+        pdb.set_trace()
+
+
         X_train,y_train = shuffle(X_train,y_train)
         
         val_err, val_loss = val_epoch(X_val,y_val)
+        test_val_err, test_val_loss = test_val_epoch(X_val,y_val)
+
+        #### check if all params are the sme after update
+        for aa, bb in zip([test_W, test_b, test_beta, test_gamma],
+                          [original_W, original_b, original_beta, original_gamma]):
+            try:
+                for aaa, bbb in zip(aa, bb):
+                    assert np.allclose(aaa.get_value(), bbb.get_value())
+            except AssertionError:
+                pdb.set_trace()
+        ####
         
         # test if validation error went down
         if val_err <= best_val_err:
